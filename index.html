@@ -649,7 +649,7 @@
   </div>
 
   <!-- ================= MODAL: STANDALONE SESSION DETAIL VIEWER ================= -->
-  <div id="sessionDetailModal" class="hidden fixed inset-0 bg-slate-900 bg-opacity-60 flex items-center justify-center p-3 sm:p-6 z-50">
+  <div id="sessionDetailModal" onclick="if(event.target === this) closeSessionDetailModal()" class="hidden fixed inset-0 bg-slate-900 bg-opacity-60 flex items-center justify-center p-3 sm:p-6 z-[65]">
     <div class="bg-white rounded-2xl max-w-3xl w-full max-h-[88vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
       <!-- Session Header -->
       <div class="px-6 py-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
@@ -911,6 +911,7 @@
     let CURRENT_EXPLORER_DAY_FILTER = '';
     let CURRENT_EXPLORER_DAYS = []; // Sorted days present in the active explorer conference
     let EXPANDED_SESSIONS = new Set(); // Set of session IDs that are expanded
+    let EXPANDED_SCHEDULE_CONFLICTS = new Set(); // Set of conflict group keys whose alternate talks are expanded in schedule view
 
     const AVAILABLE_DAYS = [
       { date: '2027-01-09', weekday: 'Sat', label: 'Jan 9 (Sat)', desc: 'Short Courses & Pre-Meeting' },
@@ -1241,6 +1242,21 @@
         }
       });
 
+      // Preserve primary_id and primary_talk_ids
+      for (const sKey in USER_SCHEDULE) {
+        if (USER_SCHEDULE[sKey] && newSchedule[sKey]) {
+          if (USER_SCHEDULE[sKey].primary_id) {
+            const pId = String(USER_SCHEDULE[sKey].primary_id);
+            if (newSchedule[sKey].talk_ids.includes(pId)) {
+              newSchedule[sKey].primary_id = pId;
+            }
+          }
+          if (Array.isArray(USER_SCHEDULE[sKey].primary_talk_ids)) {
+            newSchedule[sKey].primary_talk_ids = USER_SCHEDULE[sKey].primary_talk_ids.filter(id => newSchedule[sKey].talk_ids.includes(String(id)));
+          }
+        }
+      }
+
       const oldStr = JSON.stringify(USER_SCHEDULE);
       const newStr = JSON.stringify(newSchedule);
       if (oldStr !== newStr) {
@@ -1461,8 +1477,18 @@
           removed = true;
           if (ids.length === 0) {
             delete USER_SCHEDULE[sKey];
+            EXPANDED_SCHEDULE_SLOTS.delete(sKey);
           } else {
             USER_SCHEDULE[sKey].talk_ids = ids;
+            if (USER_SCHEDULE[sKey].primary_id === pidStr) {
+              USER_SCHEDULE[sKey].primary_id = ids[0];
+            }
+            if (Array.isArray(USER_SCHEDULE[sKey].primary_talk_ids)) {
+              USER_SCHEDULE[sKey].primary_talk_ids = USER_SCHEDULE[sKey].primary_talk_ids.filter(id => String(id) !== pidStr);
+            }
+            if (ids.length <= 1) {
+              EXPANDED_SCHEDULE_SLOTS.delete(sKey);
+            }
             delete USER_SCHEDULE[sKey].primary;
             delete USER_SCHEDULE[sKey].alternate;
           }
@@ -1502,7 +1528,8 @@
         USER_SCHEDULE[slotKey] = {
           date: p.date,
           slotLabel: slotInfo.label,
-          talk_ids: [pidStr]
+          talk_ids: [pidStr],
+          primary_id: pidStr
         };
       } else {
         let ids = getSlotTalkIds(USER_SCHEDULE[slotKey]);
@@ -1510,6 +1537,9 @@
           ids.push(pidStr);
         }
         USER_SCHEDULE[slotKey].talk_ids = ids;
+        if (!USER_SCHEDULE[slotKey].primary_id) {
+          USER_SCHEDULE[slotKey].primary_id = ids[0];
+        }
         delete USER_SCHEDULE[slotKey].primary;
         delete USER_SCHEDULE[slotKey].alternate;
       }
@@ -1956,7 +1986,7 @@
     }
 
     // ================= MODAL: STANDALONE SESSION DETAIL =================
-    function openSessionDetailModal(sessionId) {
+    function openSessionDetailModal(sessionId, highlightedPaperId = null) {
       CURRENT_MODAL_SESSION_ID = sessionId;
       const s = PROGRAM_DATA.sessions && PROGRAM_DATA.sessions[sessionId];
       if (!s) return;
@@ -1974,9 +2004,41 @@
       document.getElementById('sessionModalAMSLink').href = getConfexSessionUrl(s.id);
 
       updateSessionModalAddAllButton(s);
-      renderSessionModalTalks(s);
+      renderSessionModalTalks(s, highlightedPaperId);
 
       document.getElementById('sessionDetailModal').classList.remove('hidden');
+    }
+
+    // Helper to open session detail modal directly for any talk (matching by session_id or date/room/time)
+    function openSessionForPaper(paperId) {
+      if (!PROGRAM_DATA || !paperId) return;
+      const pidStr = String(paperId);
+      const paper = PROGRAM_DATA.papers && PROGRAM_DATA.papers[pidStr];
+      if (!paper) return;
+
+      if (paper.session_id && PROGRAM_DATA.sessions && PROGRAM_DATA.sessions[paper.session_id]) {
+        openSessionDetailModal(paper.session_id, pidStr);
+        return;
+      }
+
+      // Fallback: match by session paper_ids or date + room + time
+      if (PROGRAM_DATA.sessions) {
+        for (const sKey in PROGRAM_DATA.sessions) {
+          const s = PROGRAM_DATA.sessions[sKey];
+          if (s.paper_ids && s.paper_ids.map(String).includes(pidStr)) {
+            openSessionDetailModal(sKey, pidStr);
+            return;
+          }
+          if (s.date === paper.date && s.room && paper.room && String(s.room).trim().toLowerCase() === String(paper.room).trim().toLowerCase()) {
+            if (s.start_time <= paper.start_time && s.end_time >= paper.end_time) {
+              openSessionDetailModal(sKey, pidStr);
+              return;
+            }
+          }
+        }
+      }
+
+      alert(`Session details could not be found for Room ${paper.room || 'TBD'}.`);
     }
 
     function closeSessionDetailModal() {
@@ -2008,7 +2070,7 @@
       }
     }
 
-    function renderSessionModalTalks(session) {
+    function renderSessionModalTalks(session, highlightedPaperId = null) {
       const container = document.getElementById('sessionModalTalksContainer');
       container.innerHTML = '';
 
@@ -2021,17 +2083,27 @@
 
       papers.forEach(p => {
         const isScheduled = isPaperScheduled(p.id);
+        const isHighlighted = highlightedPaperId && String(p.id) === String(highlightedPaperId);
         const card = document.createElement('div');
-        card.className = 'p-3 bg-white border border-slate-200 rounded-xl hover:border-blue-300 transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs';
+        card.id = `modalSessionPaper_${p.id}`;
+        card.className = `p-3.5 rounded-xl transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs ${
+          isHighlighted 
+            ? 'bg-blue-50/80 border-2 border-blue-500 ring-2 ring-blue-200' 
+            : isScheduled 
+              ? 'bg-blue-50/20 border border-blue-200' 
+              : 'bg-white border border-slate-200 hover:border-blue-300'
+        }`;
 
         card.innerHTML = `
           <div class="space-y-1 flex-1 pr-2">
-            <div class="flex items-center space-x-2 text-[11px]">
+            <div class="flex items-center space-x-2 text-[11px] flex-wrap gap-y-1">
+              ${isHighlighted ? '<span class="px-2 py-0.5 rounded text-[10px] font-black bg-blue-700 text-white shadow-2xs">CURRENT TALK</span>' : ''}
               <span class="px-1.5 py-0.5 rounded font-bold ${p.type === 'Oral' ? 'bg-blue-50 text-blue-700' : 'bg-purple-50 text-purple-700'}">
                 ${p.number ? '#' + p.number : p.type}
               </span>
               <span class="font-semibold text-slate-700">${formatTime(p.start_time)} - ${formatTime(p.end_time)}</span>
-              <span class="text-slate-500">Room ${p.room || 'TBD'}</span>
+              <span class="text-slate-500 font-medium">Room ${p.room || 'TBD'}</span>
+              ${p.withdrawn ? '<span class="text-xs font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded">⚠️ WITHDRAWN</span>' : ''}
             </div>
             <h4 class="text-xs sm:text-sm font-bold text-slate-900 cursor-pointer hover:text-blue-600 leading-snug" onclick="openAbstractModal('${p.id}')">
               ${p.title}
@@ -2051,8 +2123,8 @@
             <button onclick="openAbstractModal('${p.id}')" class="px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-50 rounded-lg border border-slate-200 font-medium">
               Abstract
             </button>
-            <button onclick="togglePaperSchedule('${p.id}'); renderSessionModalTalks(PROGRAM_DATA.sessions['${session.id}']); updateSessionModalAddAllButton(PROGRAM_DATA.sessions['${session.id}']);" class="px-3 py-1 text-xs font-semibold rounded-lg shadow-2xs transition ${
-              isScheduled ? 'bg-emerald-600 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'
+            <button onclick="togglePaperSchedule('${p.id}'); renderSessionModalTalks(PROGRAM_DATA.sessions['${session.id}'], '${highlightedPaperId || ''}'); updateSessionModalAddAllButton(PROGRAM_DATA.sessions['${session.id}']);" class="px-3 py-1 text-xs font-semibold rounded-lg shadow-2xs transition ${
+              isScheduled ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'
             }">
               ${isScheduled ? '✓ Added' : '+ Add to Schedule'}
             </button>
@@ -2060,6 +2132,13 @@
         `;
         container.appendChild(card);
       });
+
+      if (highlightedPaperId) {
+        setTimeout(() => {
+          const el = document.getElementById(`modalSessionPaper_${highlightedPaperId}`);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 120);
+      }
     }
 
     function viewSessionInConferenceExplorer() {
@@ -2455,6 +2534,15 @@
       return `${weekday}, ${parts[1]}/${parts[2]}`;
     }
 
+    function getWeekdayPrefix(dateStr) {
+      if (!dateStr) return '';
+      const parts = dateStr.split('-');
+      if (parts.length < 3) return '';
+      const d = new Date(parts[0], parts[1] - 1, parts[2]);
+      const weekday = d.toLocaleDateString('en-US', { weekday: 'short' });
+      return `${weekday}. `;
+    }
+
     function initTopicTags() {
       const container = document.getElementById('topicTagPills');
       container.innerHTML = '';
@@ -2807,7 +2895,7 @@
                 ${confCode ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 uppercase">${confCode}</span>` : ''}
                 <span class="text-slate-500 font-medium">${formatDayLabel(p.date)}</span>
                 <span class="text-slate-700 font-semibold">${formatTime(p.start_time)} - ${formatTime(p.end_time)}</span>
-                <span class="text-blue-700 font-bold bg-blue-50 px-2 py-0.5 rounded border border-blue-100">Room ${p.room || 'TBD'}</span>
+                <button type="button" onclick="openSessionForPaper('${p.id}')" class="text-blue-700 font-bold bg-blue-50 hover:bg-blue-100 hover:text-blue-900 px-2 py-0.5 rounded border border-blue-200 transition cursor-pointer" title="Click to view all talks in Room ${p.room || 'TBD'} in this session">Room ${p.room || 'TBD'}</button>
                 ${p.withdrawn ? '<span class="text-red-600 font-bold bg-red-50 px-2 py-0.5 rounded text-[10px]">WITHDRAWN</span>' : ''}
               </div>
 
@@ -2966,6 +3054,99 @@
       }
     }
 
+    // Helper to determine if a presentation is a poster (which runs concurrently in parallel with other posters)
+    function isPosterPaper(paper, slotDef = null) {
+      if (!paper) return false;
+      if (paper.type && paper.type.toLowerCase() === 'poster') return true;
+      if (slotDef && ((slotDef.id === '15:00') || (slotDef.label && slotDef.label.toLowerCase().includes('poster')))) return true;
+      const sess = PROGRAM_DATA && PROGRAM_DATA.sessions && PROGRAM_DATA.sessions[paper.session_id];
+      if (sess) {
+        if (sess.good_type && sess.good_type.toLowerCase().includes('poster')) return true;
+        if (sess.title && sess.title.toLowerCase().includes('poster')) return true;
+      }
+      if (paper.room && paper.room.toLowerCase().includes('hall a') && paper.start_time === '15:00:00') return true;
+      return false;
+    }
+
+    // Group scheduled talks within a session slot strictly by presentation start time (excepting posters which run concurrently)
+    function groupOverlappingPapers(papers, slotDef = null) {
+      if (!papers || papers.length === 0) return [];
+
+      const isPosterSession = (slotDef && ((slotDef.id === '15:00') || (slotDef.label && slotDef.label.toLowerCase().includes('poster'))));
+
+      // Sort papers strictly by start_time, then end_time, then number
+      const sorted = [...papers].sort((a, b) => {
+        const ta = a.start_time || '99:99:99';
+        const tb = b.start_time || '99:99:99';
+        if (ta !== tb) return ta.localeCompare(tb);
+        const ea = a.end_time || '99:99:99';
+        const eb = b.end_time || '99:99:99';
+        if (ea !== eb) return ea.localeCompare(eb);
+        return (a.number || '').localeCompare(b.number || '');
+      });
+
+      const groups = [];
+      let currentGroup = [];
+      let currentStartTime = null;
+
+      sorted.forEach(p => {
+        // Posters in a poster session are intended to be browsed concurrently in parallel; they never conflict
+        if (isPosterSession || isPosterPaper(p, slotDef)) {
+          if (currentGroup.length > 0) {
+            groups.push(currentGroup);
+            currentGroup = [];
+            currentStartTime = null;
+          }
+          groups.push([p]);
+          return;
+        }
+
+        const sTime = p.start_time || '00:00:00';
+        if (sTime !== currentStartTime) {
+          if (currentGroup.length > 0) {
+            groups.push(currentGroup);
+          }
+          currentGroup = [p];
+          currentStartTime = sTime;
+        } else {
+          currentGroup.push(p);
+        }
+      });
+
+      if (currentGroup.length > 0) {
+        groups.push(currentGroup);
+      }
+
+      return groups;
+    }
+
+    // Determine whether a paper in a slot has a true concurrent conflict, and if so, whether it is the primary choice
+    function getPaperConflictStatus(paper, slotData) {
+      if (!paper || !slotData) return { hasConflict: false, isPrimary: true };
+      if (isPosterPaper(paper)) return { hasConflict: false, isPrimary: true };
+      const talkIds = getSlotTalkIds(slotData);
+      if (talkIds.length <= 1) return { hasConflict: false, isPrimary: true };
+
+      const papers = talkIds.map(id => PROGRAM_DATA.papers[id]).filter(Boolean);
+      const groups = groupOverlappingPapers(papers);
+      const group = groups.find(g => g.some(p => String(p.id) === String(paper.id)));
+      if (!group || group.length <= 1) {
+        return { hasConflict: false, isPrimary: true };
+      }
+
+      const preferredIds = Array.isArray(slotData.primary_talk_ids) ? slotData.primary_talk_ids : [];
+      let primaryTalk = group.find(p => preferredIds.includes(String(p.id)));
+      if (!primaryTalk && slotData.primary_id) {
+        primaryTalk = group.find(p => String(p.id) === String(slotData.primary_id));
+      }
+      if (!primaryTalk) {
+        primaryTalk = group[0];
+      }
+
+      const isPrimary = String(paper.id) === String(primaryTalk.id);
+      return { hasConflict: true, isPrimary: isPrimary, group: group, primaryTalk: primaryTalk };
+    }
+
     function renderScheduleView() {
       normalizeUserSchedule();
       const tabsContainer = document.getElementById('scheduleDayTabs');
@@ -3048,19 +3229,28 @@
 
         const candidatesCount = countAvailableTalksInSlot(CURRENT_SCHEDULE_DAY, slotDef.start, slotDef.end);
 
+        // Header Style 1 badge: show "X scheduled" if there are talks scheduled in this slot
+        const scheduledBadgeHtml = talkIds.length > 0 
+          ? `<span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200 shadow-2xs shrink-0">${talkIds.length} scheduled</span>`
+          : '';
+
+        // Group scheduled talks in this session into distinct time conflict clusters (posters are exempted)
+        const paperGroups = groupOverlappingPapers(sortedPapers, slotDef);
+
         const slotCard = document.createElement('div');
         slotCard.className = 'bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden';
         
         slotCard.innerHTML = `
           <!-- Warm Amber Light-Yellow Highlighter Slot Header -->
           <div class="px-5 py-3.5 bg-gradient-to-r from-amber-100 via-amber-50 to-amber-100/60 border-b border-amber-300/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div class="flex items-center space-x-2.5">
-              <span class="px-2.5 py-1 rounded-lg text-xs font-black bg-amber-200/90 text-amber-950 border border-amber-300 shadow-2xs tracking-wide">
+            <div class="flex items-center space-x-2.5 flex-wrap gap-y-1">
+              <span class="px-2.5 py-1 rounded-lg text-xs font-black bg-amber-200/90 text-amber-950 border border-amber-300 shadow-2xs tracking-wide shrink-0">
                 🕒 ${slotDef.start ? slotDef.start.slice(0, 5) : ''} - ${slotDef.end ? slotDef.end.slice(0, 5) : ''}
               </span>
-              <span class="text-xs sm:text-sm font-extrabold uppercase tracking-wide text-amber-950">
-                ${slotDef.label}
+              <span class="text-xs sm:text-sm font-extrabold tracking-wide text-amber-950">
+                ${getWeekdayPrefix(CURRENT_SCHEDULE_DAY)}${slotDef.label}
               </span>
+              ${scheduledBadgeHtml}
             </div>
             <div class="flex items-center space-x-2 text-xs">
               <span class="text-amber-900/70 font-semibold hidden sm:inline">
@@ -3072,23 +3262,62 @@
             </div>
           </div>
 
-          <div class="p-4 space-y-3">
-            ${sortedPapers.length > 0 
-              ? sortedPapers.map(p => renderScheduledPaperBlock(p, slotKey)).join('')
-              : `
-                <div class="p-4 rounded-xl border border-dashed border-slate-300 flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs text-slate-500 bg-slate-50/50 gap-3">
-                  <div>
-                    <span class="font-bold text-slate-700 block sm:inline">No talk scheduled yet for this time slot.</span>
-                    <span class="text-slate-400 block sm:inline sm:ml-2">Pick a presentation or let AI auto-fill.</span>
-                  </div>
-                  <div class="flex items-center space-x-2">
-                    <button onclick="pickTalkForSlot('${slotKey}')" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold shadow-2xs transition">
-                      + Pick Talk for this Slot
-                    </button>
-                  </div>
+          <div class="p-4 space-y-3.5">
+            ${paperGroups.length === 0 ? `
+              <div class="p-4 rounded-xl border border-dashed border-slate-300 flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs text-slate-500 bg-slate-50/50 gap-3">
+                <div>
+                  <span class="font-bold text-slate-700 block sm:inline">No talk scheduled yet for this time slot.</span>
+                  <span class="text-slate-400 block sm:inline sm:ml-2">Pick a presentation or let AI auto-fill.</span>
                 </div>
-              `
-            }
+                <div class="flex items-center space-x-2">
+                  <button onclick="pickTalkForSlot('${slotKey}')" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold shadow-2xs transition">
+                    + Pick Talk for this Slot
+                  </button>
+                </div>
+              </div>
+            ` : (() => {
+                const activePrecedingTalks = [];
+                return paperGroups.map((group, gIdx) => {
+                  const groupKey = `${slotKey}_grp_${gIdx}`;
+
+                  let primaryTalk = null;
+                  let alternateTalks = [];
+                  const hasAlternates = group.length > 1;
+
+                  if (!hasAlternates) {
+                    primaryTalk = group[0];
+                  } else {
+                    const preferredIds = Array.isArray(slotData.primary_talk_ids) ? slotData.primary_talk_ids : [];
+                    primaryTalk = group.find(p => preferredIds.includes(String(p.id)));
+                    if (!primaryTalk && slotData.primary_id) {
+                      primaryTalk = group.find(p => String(p.id) === String(slotData.primary_id));
+                    }
+                    if (!primaryTalk) {
+                      primaryTalk = group[0];
+                    }
+                    alternateTalks = group.filter(p => String(p.id) !== String(primaryTalk.id));
+                  }
+
+                  // Check if primaryTalk starts before an earlier active presentation finishes (skip for posters)
+                  let overlapWarningTalk = null;
+                  const isPoster = isPosterPaper(primaryTalk, slotDef);
+                  if (!isPoster) {
+                    const pStart = primaryTalk.start_time || '00:00:00';
+                    for (const prev of activePrecedingTalks) {
+                      const prevEnd = prev.end_time || prev.start_time || '00:00:00';
+                      const prevStart = prev.start_time || '00:00:00';
+                      if (prevStart < pStart && prevEnd > pStart) {
+                        overlapWarningTalk = prev;
+                        break;
+                      }
+                    }
+                    activePrecedingTalks.push(primaryTalk);
+                  }
+
+                  const isExpanded = EXPANDED_SCHEDULE_CONFLICTS.has(groupKey);
+                  return renderScheduledPaperBlock(primaryTalk, slotKey, hasAlternates, alternateTalks, groupKey, isExpanded, overlapWarningTalk);
+                }).join('');
+              })()}
           </div>
         `;
         timeline.appendChild(slotCard);
@@ -3115,23 +3344,33 @@
       return count;
     }
 
-    function renderScheduledPaperBlock(paper, slotKey) {
+    function renderScheduledPaperBlock(paper, slotKey, hasAlternates = false, alternateTalks = [], groupKey = '', isExpanded = false, overlapWarningTalk = null) {
       if (!paper) return '';
 
       const sessionObj = PROGRAM_DATA.sessions && PROGRAM_DATA.sessions[paper.session_id];
       const sessionTitle = sessionObj ? sessionObj.title : '';
       const confCode = paper.conference_code || (sessionObj ? sessionObj.conference_code : '');
+      const isPoster = isPosterPaper(paper) || (slotKey && slotKey.includes('15:00'));
+      const badgeLabel = hasAlternates ? '★ PRIMARY CHOICE' : (isPoster ? 'Poster' : 'SCHEDULED');
+      const badgeClass = hasAlternates ? 'bg-blue-800 text-white shadow-xs font-black tracking-wide' : 'bg-blue-600 text-white font-bold';
 
       return `
-        <div class="p-3.5 rounded-xl border border-blue-200 bg-blue-50/30 space-y-2">
+        <div class="p-3.5 rounded-xl border border-blue-200 bg-blue-50/30 space-y-2.5">
           <div class="flex items-center justify-between">
-            <div class="flex items-center space-x-2">
-              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-600 text-white">SCHEDULED</span>
+            <div class="flex items-center space-x-2 flex-wrap gap-y-1">
+              <span class="px-2 py-0.5 rounded text-[10px] ${badgeClass}">${badgeLabel}</span>
               <span class="text-xs font-semibold text-slate-700">${formatTime(paper.start_time)} - ${formatTime(paper.end_time)}</span>
-              <span class="text-xs font-bold text-blue-700 bg-white px-2 py-0.5 rounded border border-blue-200 shadow-2xs">
-                Room ${paper.room || 'TBD'}
-              </span>
+              <button type="button" onclick="openSessionForPaper('${paper.id}')" class="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 hover:text-blue-900 hover:border-blue-400 px-2 py-0.5 rounded border border-blue-200 shadow-2xs cursor-pointer transition select-none flex items-center space-x-1" title="Click to view all talks in Room ${paper.room || 'TBD'} in this session">
+                <span>Room ${paper.room || 'TBD'}</span>
+              </button>
+              ${paper.number ? `<span class="text-xs font-bold text-slate-700 bg-white px-2 py-0.5 rounded border border-slate-200 shadow-2xs">#${escapeHtml(paper.number)}</span>` : ''}
               ${paper.withdrawn ? '<span class="text-xs font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded">⚠️ SPEAKER WITHDRAWN</span>' : ''}
+              ${overlapWarningTalk ? `
+                <span class="text-[10px] font-bold text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded shadow-2xs flex items-center space-x-1" title="Starts before '${escapeHtml(overlapWarningTalk.presenter || 'prior presentation')}' finishes (ends at ${formatTime(overlapWarningTalk.end_time)})">
+                  <span>⚠️</span>
+                  <span>Overlaps with ${escapeHtml(overlapWarningTalk.presenter ? overlapWarningTalk.presenter.split(',')[0] : 'prior talk')} (ends ${formatTime(overlapWarningTalk.end_time)})</span>
+                </span>
+              ` : ''}
             </div>
             <button onclick="removePaperFromSchedule('${paper.id}', '${slotKey}')" class="text-slate-400 hover:text-red-600 text-xs font-semibold transition flex items-center space-x-1">
               <span>✕</span>
@@ -3145,11 +3384,13 @@
 
           ${sessionTitle ? `
             <div class="text-[11px] text-slate-500 font-medium">
-              <span class="text-slate-400">Session:</span> ${sessionTitle} ${confCode ? `<span class="text-blue-600 font-bold ml-1">(${confCode})</span>` : ''}
+              <span class="text-slate-400">Session:</span>
+              <span class="cursor-pointer hover:text-blue-600 hover:underline transition" onclick="openSessionForPaper('${paper.id}')" title="Click to view all talks in this session">${sessionTitle}</span>
+              ${confCode ? `<span class="text-blue-600 font-bold ml-1">(${confCode})</span>` : ''}
             </div>
           ` : ''}
 
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between text-xs text-slate-600 pt-1 border-t border-slate-100/80 gap-1">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between text-xs text-slate-600 pt-1 border-t border-slate-200/60 gap-1">
             <div>
               <strong class="text-slate-700">${paper.presenter || 'Author'}</strong>
               <span class="text-slate-400 mx-1">•</span>
@@ -3165,8 +3406,134 @@
               </div>
             </div>
           </div>
+
+          ${hasAlternates && alternateTalks && alternateTalks.length > 0 ? `
+            <!-- Attached Nested Alternates Drawer (inside Primary Choice Card) -->
+            <div class="mt-3 pt-2.5 border-t border-blue-200/90">
+              <div class="rounded-xl border border-blue-200/90 bg-white/95 overflow-hidden shadow-2xs">
+                <div onclick="toggleConflictGroupDrawer('${groupKey}')" class="px-3.5 py-2 flex items-center justify-between cursor-pointer hover:bg-blue-50/70 transition select-none">
+                  <div class="flex items-center space-x-2 flex-wrap gap-y-0.5">
+                    <span class="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <span>📑</span>
+                      <span>${alternateTalks.length} other scheduled talk${alternateTalks.length > 1 ? 's' : ''} at ${formatTime(paper.start_time)}</span>
+                    </span>
+                    <span class="text-[11px] text-slate-500 hidden sm:inline">• Same time window, click to view & switch</span>
+                  </div>
+                  <button type="button" class="text-xs font-bold text-blue-700 hover:text-blue-900 flex items-center space-x-1 shrink-0 bg-blue-50 hover:bg-blue-100 px-2.5 py-0.5 rounded-lg border border-blue-200 shadow-2xs transition">
+                    <span>${isExpanded ? 'Hide Alternates' : `Show Alternates (${alternateTalks.length})`}</span>
+                    <span class="text-[10px]">${isExpanded ? '▲' : '▼'}</span>
+                  </button>
+                </div>
+
+                ${isExpanded ? `
+                  <div class="p-3 pt-2.5 space-y-2.5 border-t border-blue-100 bg-slate-50/80">
+                    <div class="text-[11px] text-slate-500 font-medium px-1">
+                      These talks occupy the same time slot. Click <strong>★ Set as Primary</strong> to make one your active choice:
+                    </div>
+                    ${alternateTalks.map(altP => renderAlternatePaperBlock(altP, slotKey, groupKey)).join('')}
+                  </div>
+                ` : ''}
+              </div>
+            </div>
+          ` : ''}
         </div>
       `;
+    }
+
+    function renderAlternatePaperBlock(paper, slotKey, groupKey) {
+      if (!paper) return '';
+
+      const sessionObj = PROGRAM_DATA.sessions && PROGRAM_DATA.sessions[paper.session_id];
+      const sessionTitle = sessionObj ? sessionObj.title : '';
+      const confCode = paper.conference_code || (sessionObj ? sessionObj.conference_code : '');
+
+      return `
+        <div class="p-3 rounded-xl border border-slate-200 bg-slate-50/50 hover:border-blue-300 hover:bg-blue-50/20 transition space-y-2">
+          <div class="flex items-center justify-between gap-2 flex-wrap">
+            <div class="flex items-center space-x-2 flex-wrap gap-y-1">
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700">ALTERNATE CHOICE</span>
+              <span class="text-xs font-semibold text-slate-700">${formatTime(paper.start_time)} - ${formatTime(paper.end_time)}</span>
+              <button type="button" onclick="openSessionForPaper('${paper.id}')" class="text-xs font-bold text-slate-700 bg-white hover:bg-blue-50 hover:text-blue-700 hover:border-blue-300 px-2 py-0.5 rounded border border-slate-200 shadow-2xs cursor-pointer transition select-none flex items-center space-x-1" title="Click to view all talks in Room ${paper.room || 'TBD'} in this session">
+                <span>Room ${paper.room || 'TBD'}</span>
+              </button>
+              ${paper.number ? `<span class="text-xs font-bold text-slate-700 bg-white px-2 py-0.5 rounded border border-slate-200 shadow-2xs">#${escapeHtml(paper.number)}</span>` : ''}
+              ${paper.withdrawn ? '<span class="text-xs font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded">⚠️ SPEAKER WITHDRAWN</span>' : ''}
+            </div>
+
+            <div class="flex items-center space-x-2">
+              <button onclick="setPrimaryTalkForSlot('${slotKey}', '${paper.id}')" class="px-2.5 py-1 bg-white hover:bg-blue-600 text-blue-700 hover:text-white rounded-lg text-xs font-bold border border-blue-300 transition shadow-2xs flex items-center space-x-1" title="Set this as your active choice for this time window">
+                <span>★</span>
+                <span>Set as Primary</span>
+              </button>
+              <button onclick="removePaperFromSchedule('${paper.id}', '${slotKey}')" class="text-slate-400 hover:text-red-600 text-xs font-semibold transition px-1 py-0.5 flex items-center space-x-0.5" title="Remove from schedule">
+                <span>✕</span>
+                <span>Remove</span>
+              </button>
+            </div>
+          </div>
+
+          <h4 class="text-xs sm:text-sm font-bold text-slate-900 cursor-pointer hover:text-blue-600 leading-snug" onclick="openAbstractModal('${paper.id}')">
+            ${paper.title}
+          </h4>
+
+          ${sessionTitle ? `
+            <div class="text-[11px] text-slate-500 font-medium">
+              <span class="text-slate-400">Session:</span>
+              <span class="cursor-pointer hover:text-blue-600 hover:underline transition" onclick="openSessionForPaper('${paper.id}')" title="Click to view all talks in this session">${sessionTitle}</span>
+              ${confCode ? `<span class="text-blue-600 font-bold ml-1">(${confCode})</span>` : ''}
+            </div>
+          ` : ''}
+
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between text-xs text-slate-600 pt-1 border-t border-slate-200/60 gap-1">
+            <div class="truncate">
+              <strong class="text-slate-700">${paper.presenter || 'Author'}</strong>
+              ${paper.authors ? `<span class="text-slate-400 mx-1">•</span><span class="text-slate-500">${truncate(paper.authors, 65)}</span>` : ''}
+            </div>
+            <div class="flex items-center space-x-3 shrink-0">
+              <a href="${getConfexPaperUrl(paper.id)}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline flex items-center space-x-0.5 font-medium" title="Open on official AMS website">
+                <span>AMS Confex</span>
+                <span class="text-[10px]">↗</span>
+              </a>
+              <div class="text-blue-600 font-medium cursor-pointer hover:underline" onclick="openAbstractModal('${paper.id}')">
+                View Abstract →
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function setPrimaryTalkForSlot(slotKey, paperId) {
+      const slotData = USER_SCHEDULE[slotKey];
+      if (!slotData) return;
+      const pidStr = String(paperId);
+
+      const talkIds = getSlotTalkIds(slotData);
+      const papers = talkIds.map(id => PROGRAM_DATA.papers[id]).filter(Boolean);
+      const groups = groupOverlappingPapers(papers);
+
+      const targetGroup = groups.find(g => g.some(p => String(p.id) === pidStr));
+      const groupPaperIds = targetGroup ? targetGroup.map(p => String(p.id)) : [pidStr];
+
+      let preferred = Array.isArray(slotData.primary_talk_ids) ? [...slotData.primary_talk_ids] : [];
+      preferred = preferred.filter(id => !groupPaperIds.includes(String(id)));
+      preferred.push(pidStr);
+      slotData.primary_talk_ids = preferred;
+
+      // Keep primary_id for backwards compatibility
+      slotData.primary_id = preferred[0] || pidStr;
+
+      saveStateToStorage();
+      renderScheduleView();
+    }
+
+    function toggleConflictGroupDrawer(groupKey) {
+      if (EXPANDED_SCHEDULE_CONFLICTS.has(groupKey)) {
+        EXPANDED_SCHEDULE_CONFLICTS.delete(groupKey);
+      } else {
+        EXPANDED_SCHEDULE_CONFLICTS.add(groupKey);
+      }
+      renderScheduleView();
     }
 
     // ================= MODAL: SLOT TALKS PICKER =================
@@ -3292,9 +3659,9 @@
                   <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700">
                     🕒 ${p.start_time ? p.start_time.slice(0,5) : ''} - ${p.end_time ? p.end_time.slice(0,5) : ''}
                   </span>
-                  <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-600">
+                  <button type="button" onclick="openSessionForPaper('${p.id}')" class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 border border-slate-200 hover:border-blue-300 transition cursor-pointer" title="Click to view all talks in Room ${p.room || 'TBD'} in this session">
                     Room ${p.room || 'TBD'}
-                  </span>
+                  </button>
                   <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold ${p.type === 'Oral' ? 'bg-blue-50 text-blue-700' : 'bg-purple-50 text-purple-700'}">
                     ${p.number ? '#' + p.number : p.type}
                   </span>
@@ -3307,7 +3674,7 @@
                 ${sessionTitle ? `
                   <div class="text-[11px] text-slate-500">
                     <span class="text-slate-400">Session:</span>
-                    <span class="text-slate-700 font-medium">${sessionTitle}</span>
+                    <span class="text-slate-700 font-medium hover:text-blue-600 cursor-pointer hover:underline" onclick="openSessionForPaper('${p.id}')" title="Click to view all talks in this session">${sessionTitle}</span>
                   </div>
                 ` : ''}
 
@@ -3418,11 +3785,11 @@
                 <div class="flex items-center space-x-2 text-xs mb-1">
                   <span class="font-bold text-blue-800 bg-blue-100 px-2 py-0.5 rounded">${formatDayLabel(p.date)}</span>
                   <span class="text-slate-600 font-semibold">${formatTime(p.start_time)} - ${formatTime(p.end_time)}</span>
-                  <span class="font-bold text-slate-700 bg-white px-2 py-0.5 rounded border border-slate-200">Room ${p.room || 'TBD'}</span>
+                  <button type="button" onclick="openSessionForPaper('${p.id}')" class="font-bold text-slate-700 bg-white hover:bg-blue-50 hover:text-blue-700 px-2 py-0.5 rounded border border-slate-200 hover:border-blue-300 transition cursor-pointer" title="Click to view all talks in Room ${p.room || 'TBD'} in this session">Room ${p.room || 'TBD'}</button>
                   ${confCode ? `<span class="font-black text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded text-[10px] uppercase">${confCode}</span>` : ''}
                 </div>
                 <h4 class="text-sm font-bold text-slate-900 leading-snug">${p.title}</h4>
-                ${sessTitle ? `<div class="text-xs text-slate-500 mt-1"><span class="font-semibold text-slate-400">Session:</span> ${sessTitle}</div>` : ''}
+                ${sessTitle ? `<div class="text-xs text-slate-500 mt-1"><span class="font-semibold text-slate-400">Session:</span> <span class="hover:text-blue-600 cursor-pointer hover:underline" onclick="openSessionForPaper('${p.id}')" title="Click to view full session details">${sessTitle}</span></div>` : ''}
                 <div class="text-xs text-slate-600 mt-1">
                   <strong>${p.presenter || 'Author'}</strong>
                   ${p.authors ? `<span class="text-slate-400 mx-1">•</span><span class="text-slate-500">${p.authors}</span>` : ''}
@@ -4101,12 +4468,24 @@
               const ta = a.start_time || '99:99:99';
               const tb = b.start_time || '99:99:99';
               if (ta !== tb) return ta.localeCompare(tb);
+
+              const cA = getPaperConflictStatus(a, slotData);
+              const cB = getPaperConflictStatus(b, slotData);
+              if (cA.isPrimary !== cB.isPrimary) {
+                return cA.isPrimary ? -1 : 1;
+              }
+
+              const ea = a.end_time || '99:99:99';
+              const eb = b.end_time || '99:99:99';
+              if (ea !== eb) return ea.localeCompare(eb);
               return (a.number || '').localeCompare(b.number || '');
             });
 
           if (papers.length > 0) {
             totalDayTalks += papers.length;
             slotsForDay.push({
+              slotKey: slotKey,
+              slotData: slotData,
               slotDef: slotDef,
               papers: papers
             });
@@ -4189,7 +4568,7 @@
           html += `
             <div class="avoid-break" style="border:1px solid #cbd5e1;border-radius:6px;overflow:hidden;margin-bottom:8px;">
               <div style="background:#fef3c7;border-bottom:1px solid #fde68a;padding:5px 10px;display:flex;justify-content:space-between;align-items:center;color:#78350f;font-weight:800;font-size:8.5pt;">
-                <span>🕒 ${slotItem.slotDef.start ? slotItem.slotDef.start.slice(0,5) : ''} - ${slotItem.slotDef.end ? slotItem.slotDef.end.slice(0,5) : ''} • ${escapeHtml(slotItem.slotDef.label)}</span>
+                <span>🕒 ${slotItem.slotDef.start ? slotItem.slotDef.start.slice(0,5) : ''} - ${slotItem.slotDef.end ? slotItem.slotDef.end.slice(0,5) : ''} • ${escapeHtml(getWeekdayPrefix(dayData.day.date))}${escapeHtml(slotItem.slotDef.label)}</span>
                 <span style="font-weight:700;">${slotItem.papers.length} Talk${slotItem.papers.length === 1 ? '' : 's'}</span>
               </div>
               <div style="padding:8px 10px;display:flex;flex-direction:column;gap:8px;">
@@ -4199,10 +4578,18 @@
             const sess = PROGRAM_DATA.sessions && PROGRAM_DATA.sessions[p.session_id];
             const confCode = p.conference_code || (sess ? sess.conference_code : '');
             const sessTitle = sess ? sess.title : '';
+            const conflictInfo = getPaperConflictStatus(p, slotItem.slotData);
+            let badgeHtml = '';
+            if (conflictInfo.hasConflict) {
+              badgeHtml = conflictInfo.isPrimary 
+                ? '<span style="font-weight:800;color:#ffffff;background:#1e40af;padding:1px 6px;border-radius:3px;font-size:7.5pt;">★ PRIMARY CHOICE</span>'
+                : '<span style="font-weight:700;color:#475569;background:#f1f5f9;padding:1px 6px;border-radius:3px;border:1px solid #cbd5e1;font-size:7.5pt;">ALTERNATE</span>';
+            }
 
             html += `
               <div class="avoid-break" style="${pIdx > 0 ? 'border-top:1px dashed #e2e8f0;padding-top:7px;' : ''}">
                 <div style="display:flex;align-items:center;gap:6px;font-size:8pt;margin-bottom:3px;flex-wrap:wrap;">
+                  ${badgeHtml}
                   <span style="font-weight:700;color:#1d4ed8;background:#eff6ff;padding:1px 5px;border-radius:3px;border:1px solid #bfdbfe;">${formatTime(p.start_time)} - ${formatTime(p.end_time)}</span>
                   <span style="font-weight:700;color:#334155;background:#f8fafc;padding:1px 5px;border-radius:3px;border:1px solid #cbd5e1;">Room ${escapeHtml(p.room || 'TBD')}</span>
                   ${confCode ? `<span style="font-weight:800;color:#92400e;background:#fef3c7;padding:1px 5px;border-radius:3px;border:1px solid #fde68a;text-transform:uppercase;">${escapeHtml(confCode)}</span>` : ''}
@@ -4302,7 +4689,7 @@
           daysBodyHtml += `
             <div style="border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;background:#ffffff;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
               <div style="background:linear-gradient(to right, #fef3c7, #fef9c3);border-bottom:1px solid #fde68a;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;color:#78350f;font-weight:800;font-size:12px;">
-                <span>🕒 ${slotItem.slotDef.start ? slotItem.slotDef.start.slice(0,5) : ''} - ${slotItem.slotDef.end ? slotItem.slotDef.end.slice(0,5) : ''} • ${escapeHtml(slotItem.slotDef.label)}</span>
+                <span>🕒 ${slotItem.slotDef.start ? slotItem.slotDef.start.slice(0,5) : ''} - ${slotItem.slotDef.end ? slotItem.slotDef.end.slice(0,5) : ''} • ${escapeHtml(getWeekdayPrefix(dayData.day.date))}${escapeHtml(slotItem.slotDef.label)}</span>
                 <span style="font-weight:700;background:#fef3c7;padding:2px 8px;border-radius:4px;border:1px solid #fcd34d;">${slotItem.papers.length} Talk${slotItem.papers.length === 1 ? '' : 's'}</span>
               </div>
               <div style="padding:14px 16px;display:flex;flex-direction:column;gap:14px;">
@@ -4313,10 +4700,18 @@
             const confCode = p.conference_code || (sess ? sess.conference_code : '');
             const sessTitle = sess ? sess.title : '';
             const confexUrl = getConfexPaperUrl(p.id);
+            const conflictInfo = getPaperConflictStatus(p, slotItem.slotData);
+            let badgeHtml = '';
+            if (conflictInfo.hasConflict) {
+              badgeHtml = conflictInfo.isPrimary 
+                ? '<span style="font-weight:800;color:#ffffff;background:#1e40af;padding:2px 8px;border-radius:4px;font-size:10px;">★ PRIMARY CHOICE</span>'
+                : '<span style="font-weight:700;color:#475569;background:#f1f5f9;padding:2px 8px;border-radius:4px;border:1px solid #cbd5e1;font-size:10px;">ALTERNATE</span>';
+            }
 
             daysBodyHtml += `
               <div style="${pIdx > 0 ? 'border-top:1px solid #f1f5f9;padding-top:14px;' : ''}">
                 <div style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:6px;flex-wrap:wrap;">
+                  ${badgeHtml}
                   <span style="font-weight:700;color:#1d4ed8;background:#eff6ff;padding:2px 6px;border-radius:4px;border:1px solid #bfdbfe;">${formatTime(p.start_time)} - ${formatTime(p.end_time)}</span>
                   <span style="font-weight:700;color:#334155;background:#f8fafc;padding:2px 6px;border-radius:4px;border:1px solid #e2e8f0;">Room ${escapeHtml(p.room || 'TBD')}</span>
                   ${confCode ? `<span style="font-weight:800;color:#92400e;background:#fef3c7;padding:2px 6px;border-radius:4px;border:1px solid #fde68a;text-transform:uppercase;">${escapeHtml(confCode)}</span>` : ''}
@@ -4586,10 +4981,14 @@
       ];
 
       for (const slotKey in USER_SCHEDULE) {
-        const talkIds = getSlotTalkIds(USER_SCHEDULE[slotKey]);
+        const slotData = USER_SCHEDULE[slotKey];
+        const talkIds = getSlotTalkIds(slotData);
         talkIds.forEach(pid => {
           const p = PROGRAM_DATA.papers[pid];
           if (!p || !p.date || !p.start_time) return;
+
+          const conflictInfo = getPaperConflictStatus(p, slotData);
+          const prefix = (conflictInfo.hasConflict && !conflictInfo.isPrimary) ? '[Alternate] ' : '';
 
           const dtStart = p.date.replace(/-/g, '') + 'T' + p.start_time.replace(/:/g, '');
           const dtEnd = p.end_time ? p.date.replace(/-/g, '') + 'T' + p.end_time.replace(/:/g, '') : dtStart;
@@ -4599,7 +4998,7 @@
           icsLines.push(`DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').split('.')[0]}Z`);
           icsLines.push(`DTSTART:${dtStart}`);
           icsLines.push(`DTEND:${dtEnd}`);
-          icsLines.push(`SUMMARY:${escapeICS(p.title)}`);
+          icsLines.push(`SUMMARY:${escapeICS(prefix + p.title)}`);
           icsLines.push(`LOCATION:${escapeICS('Room ' + (p.room || 'TBD') + ', Colorado Convention Center')}`);
           icsLines.push(`DESCRIPTION:${escapeICS('Presenter: ' + (p.presenter || '') + '\\n\\n' + (p.abstract || ''))}`);
           icsLines.push("END:VEVENT");
