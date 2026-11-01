@@ -21,10 +21,11 @@ In this folder, run:
 ```bash
 python3 app.py
 ```
-This automatically starts a lightweight local server and opens `http://localhost:8080/schedule_app.html` in your default browser.
+This automatically starts a lightweight local server and opens `http://localhost:8080/` in your default browser.
 
 ### 2. Use via GitHub Pages
-Anyone can visit the GitHub Pages site associated with the repo/fork to build their schedule in the browser, and the schedule is stored strictly locally.
+Anyone can visit the GitHub Pages site associated with the repo/fork to build their schedule in the browser, and the schedule is stored strictly locally.    
+Example: https://guoqing-noaa.github.io/ams_quick_scheduler/
 
 ## 🔄 Updating Data in the Final Days
 

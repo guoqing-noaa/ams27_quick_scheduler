@@ -68,7 +68,7 @@ def main():
         import fetch_ams_program
         fetch_ams_program.build_program_dataset()
 
-    url = f"http://localhost:{PORT}/schedule_app.html"
+    url = f"http://localhost:{PORT}/"
     print("=" * 60)
     print("  AMS Quick Scheduler")
     print(f"  Local URL: {url}")
