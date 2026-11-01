@@ -40,3 +40,7 @@ python3 fetch_ams_program.py --meeting 107ANNUAL
 ## 📄 License
 
 This project is open-source and available under the [MIT License](LICENSE).
+
+## ⚠️ Disclaimer
+
+This is an independent, open-source community tool and does not replace the official AMS Confex program. Please always verify official room assignments and schedule details on the AMS site.
