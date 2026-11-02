@@ -25,7 +25,7 @@ This automatically starts a lightweight local server and opens `http://localhost
 
 ### 2. Use via GitHub Pages
 Anyone can visit the GitHub Pages site associated with the repo/fork to build their schedule in the browser, and the schedule is stored strictly locally.    
-Example: https://guoqing-noaa.github.io/ams_quick_scheduler/
+Example: https://guoqing-noaa.github.io/ams27_quick_scheduler/
 
 ## 🔄 Updating Data in the Final Days
 
